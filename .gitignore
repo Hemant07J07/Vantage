@@ -10,7 +10,6 @@ venv/
 .env
 .env.local
 *.env.local
-oracle.env
 !*.env.example
 
 # --- Django ------------------------------------------------------------

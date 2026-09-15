@@ -366,15 +366,30 @@ unreachable rather than quietly counted as unchanged.
 
 ### Deploying
 
-`render.yaml` provisions the backend, ai-service and SearXNG as Render web
-services plus a free Postgres and Key Value (Render's free plan has no
-background-worker option, so the Celery layer runs separately — see
-`docker-compose.oracle.yml` and `oracle.env.example` for running it on a free
-Oracle Cloud VM instead, pointed at Render's databases over their external
-connection strings). The frontend deploys to Vercel natively, no extra config
-beyond `BACKEND_INTERNAL_URL`/`NEXT_PUBLIC_WS_URL` pointed at the Render
-backend's public URL — `NEXT_PUBLIC_WS_URL` is baked into the client bundle
-at build time, so changing it later needs a redeploy, not just an env var edit.
+`render.yaml` provisions the entire backend side of the deployment in one
+pass ("New → Blueprint" against this repo): the Django backend, ai-service
+and SearXNG as web services, a free Postgres and Key Value, and all five
+Celery processes (qualify-worker, research-worker, monitor-worker,
+trends-worker, beat) as separate background workers — kept separate rather
+than consolidated onto fewer instances, so the concurrency isolation this
+codebase relies on (the qualify/research split, monitor's concurrency=4,
+trends' concurrency=1) stays exactly as built. Render has no free tier for
+background workers, so budget roughly **$35-40/mo** for the five of them on
+Render's cheapest paid plan; the web services and databases stay free-tier
+eligible.
+
+The frontend deploys to Vercel natively, no extra config beyond
+`BACKEND_INTERNAL_URL`/`NEXT_PUBLIC_WS_URL` pointed at the Render backend's
+public URL — `NEXT_PUBLIC_WS_URL` is baked into the client bundle at build
+time, so changing it later needs a redeploy, not just an env var edit.
+
+One ordering wrinkle worth knowing before the first deploy: only the backend
+service runs migrations on startup. Render deploys blueprint services
+independently, with no equivalent to docker-compose's "wait for migrations to
+finish first" — a worker that starts before migrations complete will fail its
+first few tasks, then recover on its own once they do (Render restarts
+crashed worker processes automatically). Not a problem after the first
+deploy, just not instant on it.
 
 ---
 
