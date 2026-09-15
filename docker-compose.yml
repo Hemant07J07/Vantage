@@ -1,0 +1,258 @@
+name: vantage
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vantage}
+      POSTGRES_USER: ${POSTGRES_USER:-vantage}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vantage}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vantage}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  # Self-hosted metasearch. Aggregates Google, Bing, Brave and DuckDuckGo
+  # behind one keyless JSON API, which is what makes it the first search
+  # provider: no account, no quota, and one upstream engine rate-limiting us
+  # no longer ends the search.
+  #
+  # Deliberately NOT a `depends_on` of ai-service. Research must still run when
+  # this is down — web_search.py falls through to Ollama's API and then ddgs.
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      # Used by SearXNG to build absolute URLs in its own responses.
+      BASE_URL: http://localhost:8080/
+      INSTANCE_NAME: vantage
+    volumes:
+      # Our settings file, not a named volume: the JSON API is disabled by
+      # default and a volume would hide that config from version control.
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # AI microservice — Groq (hosted model) + web search + the qualification
+  # agent. No local model daemon to point at anymore, so nothing here depends
+  # on the host machine — a real change from when this ran against Ollama:
+  # `docker compose up` alone is now sufficient, GROQ_API_KEY in
+  # ai-service/.env is the only thing you need to supply yourself.
+  ai-service:
+    build: ./ai-service
+    env_file:
+      - ./ai-service/.env
+    environment:
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://backend:8000
+      SEARXNG_URL: http://searxng:8080
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # migrate, backend and both workers are the SAME code with different
+  # commands, so they all carry an explicit `image: vantage-backend`.
+  #
+  # Without that, compose derives a SEPARATE image per service from the one
+  # build context, and `docker compose build backend` silently leaves the
+  # others on whatever they were last built from. That is not hypothetical:
+  # the API spent a week serving new pipeline stages while the research worker
+  # ran six-day-old code and kept writing a stage value that no longer existed
+  # in the enum. Sharing the name means one build updates all four.
+  #
+  # One-shot migration runner. This is the ONLY service that migrates — the
+  # four used to race each other running `migrate` from the shared entrypoint,
+  # which intermittently killed the backend with a duplicate-key error on
+  # pg_type.
+  migrate:
+    build: ./backend
+    image: vantage-backend
+    command: python manage.py migrate --noinput
+    env_file:
+      - ./backend/.env
+    environment:
+      RUN_MIGRATIONS: "false"   # the command above migrates; don't do it twice
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build: ./backend
+    image: vantage-backend
+    command: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8001
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  # Each worker is deliberately single-concurrency: a previous run with
+  # --concurrency=4 sent four requests at once against a single-concurrency
+  # local model backend, they queued behind each other, and every one of them
+  # blew past the HTTP timeout. Staying single-concurrency also keeps this
+  # comfortably under the hosted model provider's own per-minute rate limit.
+  # Two queues keep a slow research job from starving inbound lead
+  # qualification.
+  qualify-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q qualify,celery --concurrency=1
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8001
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+
+  research-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q research --concurrency=1
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8001
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+
+  # Change monitoring. Checks are page fetches and hashing rather than model
+  # calls, so unlike the two queues above this one is not pinned to a single
+  # worker — only the minority of checks that find a real change reach the
+  # model provider, and then for one short classification call.
+  #
+  # Both of these idle unless MONITOR_ENABLED=true is set in backend/.env.
+  monitor-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q monitor --concurrency=4
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8001
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+
+  # Trend scanning. Unlike monitor-worker above, EVERY call here does a real
+  # web search plus one model call — there's no cheap majority case that skips
+  # the model provider. --concurrency=1 is required, not just conservative:
+  # running several of these at once would burn through the provider's
+  # per-minute rate limit fast, and risks the same queued-behind-each-other
+  # timeout failure mode fixed elsewhere in this project by giving
+  # qualify/research their own single-concurrency queues.
+  #
+  # Idles unless TREND_SCAN_ENABLED=true is set in backend/.env.
+  trends-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q trends --concurrency=1
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      AI_SERVICE_URL: http://ai-service:8001
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ai-service:
+        condition: service_started
+
+  # The scheduler. Only ever enqueues dispatcher tasks; all real work happens
+  # on monitor-worker / trends-worker.
+  beat:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config beat -l info
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_WS_URL: ws://localhost:8000/ws/dashboard/
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

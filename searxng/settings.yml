@@ -1,0 +1,37 @@
+# SearXNG configuration for Vantage.
+#
+# `use_default_settings` inherits SearXNG's full upstream config (every engine,
+# every locale) and overrides only the handful of things below, so upgrading
+# the image doesn't mean re-maintaining a fork of their settings file.
+use_default_settings: true
+
+server:
+  # SearXNG refuses to start without one. This instance is reachable only on
+  # the compose network and from localhost, and serves anonymous search with no
+  # accounts or sessions, so the value carries no secret — but it must exist.
+  secret_key: "vantage-local-searxng-not-a-production-secret"
+
+  # The bot limiter blocks programmatic access, which is exactly what we are.
+  # Safe to disable because this instance is not exposed to the internet.
+  limiter: false
+  image_proxy: false
+
+search:
+  # The JSON API is off by default; without it every request gets a 403 and
+  # the provider chain silently falls through to ddgs.
+  formats:
+    - html
+    - json
+  # Research queries are English-language company intelligence.
+  default_lang: "en"
+  # Don't let one slow upstream engine hold the whole response past the 8s
+  # client timeout in web_search.py.
+  max_request_timeout: 6.0
+
+engines:
+  # Disabled purely for latency: these add seconds per query and return
+  # nothing a research claim can cite.
+  - name: wikidata
+    disabled: true
+  - name: currency
+    disabled: true

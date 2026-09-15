@@ -1,0 +1,226 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Fonts are loaded via a <link> in app/layout.tsx rather than next/font —
+       see the comment there for why. These stacks carry the fallbacks. */
+    --font-display: "Space Grotesk", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    --font-body: "Inter", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+    color-scheme: dark;
+
+    --rail-collapsed: 68px;
+    --rail-expanded: 236px;
+  }
+
+  html {
+    background-color: theme("colors.base");
+  }
+
+  /**
+   * The page's depth comes from three fixed radial glows rather than an
+   * animated canvas: a dashboard is read, not watched, and a moving field
+   * behind dense tables costs legibility and battery for no comprehension.
+   * `fixed` attachment keeps the glow anchored to the viewport, so scrolling
+   * a long table doesn't drag the lighting with it.
+   */
+  body {
+    @apply text-body font-body antialiased;
+    background-color: theme("colors.base");
+    background-image:
+      radial-gradient(120% 80% at 12% 0%, rgba(124, 92, 255, 0.16), transparent 60%),
+      radial-gradient(90% 70% at 85% 10%, rgba(41, 211, 238, 0.1), transparent 55%),
+      radial-gradient(100% 60% at 50% 100%, rgba(124, 92, 255, 0.06), transparent 70%);
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-display text-hi;
+  }
+
+  :focus-visible {
+    outline: 2px solid theme("colors.accent.DEFAULT");
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background-color: theme("colors.accent.soft");
+    color: theme("colors.hi");
+  }
+
+  /* Dark scrollbars — the browser default light track is jarring against
+     near-black surfaces. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme("colors.line-strong") transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: theme("colors.line-strong");
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: theme("colors.muted");
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer components {
+  /**
+   * The sidebar rail: an icon strip that opens on hover and closes when the
+   * pointer leaves.
+   *
+   * Two details make this work where the earlier version didn't:
+   *
+   * 1. The rail is a normal in-flow element, so widening it **pushes** the
+   *    page across instead of floating over it. The first attempt was
+   *    `fixed` with a spacer, which meant expanding covered whatever you
+   *    were reading.
+   * 2. Expanding waits ~120ms; collapsing is immediate. Without the delay,
+   *    merely sweeping the cursor past the left edge on the way somewhere
+   *    else would reflow the whole page. Leaving must stay instant, because
+   *    a rail that lingers open is a rail that's in the way.
+   */
+  .rail {
+    width: var(--rail-collapsed);
+    transition: width 200ms ease-out;
+    transition-delay: 0ms;
+  }
+
+  .rail:hover,
+  .rail:focus-within {
+    width: var(--rail-expanded);
+    transition-delay: 120ms;
+  }
+
+  /**
+   * Rail content that belongs to the expanded state.
+   *
+   * Fades rather than being cropped. The rail hid its labels purely by
+   * `overflow-hidden` before, so the collapsed edge sliced through whatever
+   * glyph landed on it — the stray "VA" and "Resear" that made the rail look
+   * broken rather than collapsed.
+   */
+  .rail-reveal,
+  .rail-lockup span {
+    opacity: 0;
+    transition: opacity 120ms ease;
+    transition-delay: 0ms;
+  }
+
+  .rail:hover .rail-reveal,
+  .rail:focus-within .rail-reveal,
+  .rail:hover .rail-lockup span,
+  .rail:focus-within .rail-lockup span {
+    opacity: 1;
+    /* Slightly behind the width so text fades in against a rail that has
+       already started opening, rather than over the collapsed edge. */
+    transition-delay: 180ms;
+  }
+
+  /**
+   * The card recipe. Translucent rather than opaque so the page's background
+   * glow reads through, which is what stops a grid of cards looking like flat
+   * grey boxes on black.
+   *
+   * Blur is capped at 14px: every card on a dense page carries one, and
+   * backdrop-filter is the single most expensive thing here on weak GPUs.
+   */
+  .glass-card {
+    background-color: theme("colors.glass");
+    border: 1px solid theme("colors.line");
+    border-radius: theme("borderRadius.card");
+    backdrop-filter: blur(14px) saturate(120%);
+    -webkit-backdrop-filter: blur(14px) saturate(120%);
+  }
+
+  /* Wells inside a card — chart areas, code, nested rows. */
+  .glass-inset {
+    background-color: rgba(0, 0, 0, 0.22);
+    border: 1px solid theme("colors.line");
+    border-radius: 12px;
+  }
+
+  /* The small uppercase mono caption used for every label, unit and stamp. */
+  .label-mono {
+    @apply font-mono text-[10px] uppercase tracking-[0.14em] text-muted;
+  }
+
+  /**
+   * A hairline of light crossing the top edge. Applied to the summary strip
+   * to mark it as computed-live rather than static chrome.
+   * Honours prefers-reduced-motion via the global rule below.
+   */
+  .sweep-line {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .sweep-line::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 1px;
+    width: 32%;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      theme("colors.accent.hover"),
+      transparent
+    );
+    animation: sweep 4.5s linear infinite;
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Sweeping highlight used by skeleton loaders. */
+  .shimmer::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background-image: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0) 0,
+      rgba(255, 255, 255, 0.04) 40%,
+      rgba(255, 255, 255, 0.07) 60%,
+      rgba(255, 255, 255, 0)
+    );
+    animation: shimmer 1.6s infinite;
+  }
+}

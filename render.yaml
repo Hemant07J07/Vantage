@@ -1,0 +1,103 @@
+# Render Blueprint — provisions the Render-hosted half of the deployment in
+# one pass ("New -> Blueprint" against this repo) instead of configuring five
+# services by hand through the dashboard.
+#
+# Deliberately NOT here: the four Celery workers + beat. Render's free plan
+# has no background-worker option at all (paid only, from $7/mo each) — they
+# run on a separately provisioned Oracle Cloud Always Free VM instead. See
+# docker-compose.oracle.yml and oracle.env.example.
+#
+# `sync: false` on a secret means: set it in the Render dashboard after the
+# blueprint deploys, never commit it here.
+
+databases:
+  - name: vantage-db
+    plan: free
+    databaseName: vantage
+    user: vantage
+
+services:
+  - type: redis
+    name: vantage-redis
+    plan: free
+    ipAllowList: []  # Populated later with the Oracle VM's IP once it exists — see Part C of the deploy plan.
+
+  - type: web
+    name: vantage-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+    plan: free
+    healthCheckPath: /api/
+    envVars:
+      - key: RUN_MIGRATIONS
+        value: "true"  # entrypoint.sh's existing flag — reused as-is rather than inventing a Render-specific migration path.
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_SECRET_KEY
+        sync: false
+      - key: DJANGO_ALLOWED_HOSTS
+        sync: false  # vantage-backend.onrender.com, filled in after the first deploy assigns the domain.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false  # your Vercel domain.
+      - key: POSTGRES_DB
+        fromDatabase: { name: vantage-db, property: database }
+      - key: POSTGRES_USER
+        fromDatabase: { name: vantage-db, property: user }
+      - key: POSTGRES_PASSWORD
+        fromDatabase: { name: vantage-db, property: password }
+      - key: POSTGRES_HOST
+        fromDatabase: { name: vantage-db, property: host }
+      - key: POSTGRES_PORT
+        fromDatabase: { name: vantage-db, property: port }
+      - key: REDIS_URL
+        fromService: { type: redis, name: vantage-redis, property: connectionString }
+      - key: AI_SERVICE_URL
+        fromService: { type: web, name: vantage-ai-service, property: hostport }
+      - key: AI_SERVICE_TIMEOUT_SECONDS
+        value: "100"
+      - key: AI_RESEARCH_TIMEOUT_SECONDS
+        value: "200"
+      - key: HIGH_INTENT_THRESHOLD
+        value: "75"
+      - key: RESEARCH_CACHE_TTL_HOURS
+        value: "168"
+      - key: MONITOR_ENABLED
+        value: "false"  # Flip once the Oracle worker VM is actually up and pointed at this Postgres/Redis — see Part C.
+      - key: TREND_SCAN_ENABLED
+        value: "false"  # Same.
+
+  - type: web
+    name: vantage-ai-service
+    runtime: docker
+    dockerfilePath: ./ai-service/Dockerfile
+    dockerContext: ./ai-service
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: qwen/qwen3-32b
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: SEARXNG_URL
+        fromService: { type: web, name: vantage-searxng, property: hostport }
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false  # your Render backend's own URL + Vercel domain.
+      - key: OLLAMA_API_KEY
+        value: ""  # Unrelated to GROQ_*: only the optional hosted-search provider in web_search.py.
+
+  - type: web
+    name: vantage-searxng
+    runtime: docker
+    dockerfilePath: ./searxng/Dockerfile
+    dockerContext: ./searxng
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: BASE_URL
+        sync: false  # https://vantage-searxng.onrender.com/, filled in after the first deploy assigns the domain.
+      - key: INSTANCE_NAME
+        value: vantage

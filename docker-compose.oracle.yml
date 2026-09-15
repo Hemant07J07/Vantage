@@ -1,0 +1,60 @@
+# The Celery layer, run standalone on an Oracle Cloud Always Free VM.
+#
+# Render's free plan has no background-worker option at all — this is the
+# other half of that split. Same images, same queue/concurrency flags as
+# docker-compose.yml's worker services, unchanged; only the environment
+# differs, since everything here now connects OUTWARD to Render's Postgres
+# and Key Value over their public URLs instead of a shared docker network.
+#
+# Run from the repo root on the VM:
+#   cp oracle.env.example oracle.env   # then fill it in
+#   docker compose -f docker-compose.oracle.yml --env-file oracle.env up -d --build
+#
+# Before this can connect: on Render, enable external connections on both
+# vantage-db and vantage-redis, and allow-list this VM's public IP on both —
+# see oracle.env.example for exactly what's needed.
+#
+# No `depends_on` anywhere below: nothing else runs on this VM for these
+# services to wait on. No `migrate` service either — migrations run on the
+# Render backend service (RUN_MIGRATIONS=true there), not from here.
+
+services:
+  qualify-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q qualify,celery --concurrency=1
+    env_file:
+      - ./oracle.env
+    restart: always
+
+  research-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q research --concurrency=1
+    env_file:
+      - ./oracle.env
+    restart: always
+
+  monitor-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q monitor --concurrency=4
+    env_file:
+      - ./oracle.env
+    restart: always
+
+  trends-worker:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config worker -l info -Q trends --concurrency=1
+    env_file:
+      - ./oracle.env
+    restart: always
+
+  beat:
+    build: ./backend
+    image: vantage-backend
+    command: celery -A config beat -l info
+    env_file:
+      - ./oracle.env
+    restart: always

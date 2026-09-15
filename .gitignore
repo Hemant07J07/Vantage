@@ -1,0 +1,33 @@
+# --- Python (backend/, ai-service/) ---------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.sqlite3
+
+# --- Environment files (never commit real secrets/keys) -------------------
+.env
+.env.local
+*.env.local
+oracle.env
+!*.env.example
+
+# --- Django ------------------------------------------------------------
+staticfiles/
+media/
+
+# --- Node / Next.js (frontend/, also has its own .gitignore) --------------
+node_modules/
+.next/
+*.tsbuildinfo
+npm-debug.log*
+
+# --- Editors / OS -----------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Redis dump if run locally without Docker ------------------------------
+dump.rdb
