@@ -103,13 +103,13 @@ place to hide the backend URL and attach auth without a separate BFF service.
 
 ---
 
-## 2. Model choice: why `qwen/qwen3-32b` on Groq
+## 2. Model choice: why `qwen/qwen3.8-27b` on Groq
 
 This project originally ran a local model via Ollama. It now calls
 [Groq](https://console.groq.com)'s hosted, OpenAI-compatible API instead — no
 GPU, no multi-GB download, no host-machine dependency at all. `ai-service/app/main.py`
 reads `GROQ_MODEL` from the environment — change it any time by editing
-`ai-service/.env`, no code changes needed. The default is `qwen/qwen3-32b`
+`ai-service/.env`, no code changes needed. The default is `qwen/qwen3.8-27b`
 because Groq's free tier hosts it directly: no card required, 14,400
 requests/day and 30/minute — comfortably enough for this app's volume,
 including the scheduled monitoring/trend-scan tasks (see §7).
@@ -117,7 +117,7 @@ including the scheduled monitoring/trend-scan tasks (see §7).
 **One real trade-off from moving off a local model, stated plainly rather than
 hidden**: Ollama's `format=` parameter guaranteed syntactically valid JSON at
 the token level. Groq documents that same *guaranteed* mode as available only
-for its own `gpt-oss-*` models — Qwen3-32B gets best-effort JSON, which
+for its own `gpt-oss-*` models — this model gets best-effort JSON, which
 usually matches the schema but isn't guaranteed to. `agents/base.py`'s
 existing one-shot repair retry (ask the model to fix its own malformed
 response) is what actually covers this gap, and it was already needed for
@@ -131,7 +131,7 @@ account):
 |---|---|
 | `openai/gpt-oss-20b` | Same free tier, and Groq's *guaranteed*-valid-JSON mode is only available on this model family — trade the "Qwen" name for a hard reliability guarantee on structured output. |
 | `openai/gpt-oss-120b` | Same guarantee, larger model, still on Groq's free tier at time of writing. |
-| `qwen/qwen3-32b` | The default — see above. |
+| `qwen/qwen3.8-27b` | The default — see above. |
 
 Two design choices keep a model swap cheap:
 

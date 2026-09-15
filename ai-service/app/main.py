@@ -46,12 +46,12 @@ GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # See README.md "Model choice" for the reasoning behind this default.
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b")
 
 # Human-readable names for the dashboard's agent-status rail, which reads this
 # from /health rather than hardcoding a label that drifts from reality.
 MODEL_LABELS = {
-    "qwen/qwen3-32b": "Qwen 3 (32B, Groq)",
+    "qwen/qwen3.8-27b": "Qwen 3.8 (27B, Groq)",
     "openai/gpt-oss-20b": "GPT-OSS (20B, Groq)",
     "openai/gpt-oss-120b": "GPT-OSS (120B, Groq)",
 }

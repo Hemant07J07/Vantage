@@ -9,6 +9,7 @@ though: two real translations happen here, not just a different base URL.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -32,6 +33,11 @@ _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 # but it's now spent as an output-length cap (`max_completion_tokens`) rather
 # than an input-window size.
 DEFAULT_NUM_CTX = 8192
+
+# A 429 gets a few short retries (2s, 4s, 8s backoff, or whatever Retry-After
+# says) before giving up — enough to ride out a burst without turning a
+# genuinely exhausted quota into a long hang.
+MAX_RATE_LIMIT_RETRIES = 3
 
 
 def strip_thinking(content: str) -> str:
@@ -87,6 +93,40 @@ class LLMClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
 
+    async def _post_with_retry(
+        self, body: dict[str, Any], *, timeout: float | None
+    ) -> dict[str, Any]:
+        """
+        POST /chat/completions, absorbing a rate-limit response rather than
+        failing the whole research step on it.
+
+        Discovered live, not theoretical: a burst of calls against this app's
+        own free-tier key (several research steps in close succession) drew a
+        real 429 from Groq mid-run. Groq's free tier is 30 requests/minute —
+        comfortable for this app's normal pace, tight under a burst — so this
+        is worth absorbing rather than surfacing as a hard failure. Honours
+        `Retry-After` when Groq sends one; otherwise backs off by attempt
+        number. Any other error status still raises immediately — this is
+        specifically for "try again shortly," not a general retry-everything.
+        """
+        attempt = 0
+        async with httpx.AsyncClient(timeout=timeout or self.timeout_seconds) as client:
+            while True:
+                resp = await client.post(
+                    f"{self.base_url}/chat/completions", json=body, headers=self._headers()
+                )
+                if resp.status_code != 429 or attempt >= MAX_RATE_LIMIT_RETRIES:
+                    resp.raise_for_status()
+                    return resp.json()
+
+                wait = float(resp.headers.get("Retry-After", "0")) or (2**attempt)
+                logger.warning(
+                    "Groq rate limit hit (attempt %s/%s), retrying in %.1fs",
+                    attempt + 1, MAX_RATE_LIMIT_RETRIES, wait,
+                )
+                await asyncio.sleep(wait)
+                attempt += 1
+
     async def health_check(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -131,7 +171,7 @@ class LLMClient:
         `json_schema` becomes OpenAI-style `response_format`, not passed
         through raw. `strict` is deliberately False: Groq documents guaranteed
         schema-valid output as available only for its own gpt-oss models, not
-        Qwen3-32B. Best-effort mode usually matches the schema; when it
+        the Qwen models. Best-effort mode usually matches the schema; when it
         doesn't, `run_json_agent`'s existing one-shot repair retry is the
         safety net — that's what makes this an acceptable trade rather than a
         silent reliability regression.
@@ -150,12 +190,7 @@ class LLMClient:
                 "json_schema": {"name": "response", "schema": json_schema, "strict": False},
             }
 
-        async with httpx.AsyncClient(timeout=timeout or self.timeout_seconds) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions", json=body, headers=self._headers()
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        data = await self._post_with_retry(body, timeout=timeout)
 
         choice = (data.get("choices") or [{}])[0]
         message: dict[str, Any] = dict(choice.get("message") or {})
