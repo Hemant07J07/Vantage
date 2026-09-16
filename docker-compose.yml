@@ -1,31 +1,11 @@
 name: vantage
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-vantage}
-      POSTGRES_USER: ${POSTGRES_USER:-vantage}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vantage}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vantage}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    ports:
-      - "5432:5432"
-
-  redis:
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    ports:
-      - "6379:6379"
+  # No local postgres or redis service — backend/.env's POSTGRES_* and
+  # REDIS_URL point at hosted Supabase (Postgres) and Upstash (Redis)
+  # instead, for both local dev and the deployed backend. If you'd rather
+  # develop against disposable local services again, add `postgres:`/`redis:`
+  # services back (see git history) and point backend/.env at them.
 
   # Self-hosted metasearch. Aggregates Google, Bing, Brave and DuckDuckGo
   # behind one keyless JSON API, which is what makes it the first search
@@ -94,11 +74,6 @@ services:
       - ./backend/.env
     environment:
       RUN_MIGRATIONS: "false"   # the command above migrates; don't do it twice
-      POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: "no"
 
   backend:
@@ -108,16 +83,10 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8001
     depends_on:
       migrate:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       ai-service:
         condition: service_started
     ports:
@@ -137,16 +106,10 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8001
     depends_on:
       migrate:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       ai-service:
         condition: service_started
 
@@ -157,16 +120,10 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8001
     depends_on:
       migrate:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       ai-service:
         condition: service_started
 
@@ -183,16 +140,10 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8001
     depends_on:
       migrate:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       ai-service:
         condition: service_started
 
@@ -212,16 +163,10 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
       AI_SERVICE_URL: http://ai-service:8001
     depends_on:
       migrate:
         condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
       ai-service:
         condition: service_started
 
@@ -233,14 +178,9 @@ services:
     command: celery -A config beat -l info
     env_file:
       - ./backend/.env
-    environment:
-      POSTGRES_HOST: postgres
-      REDIS_URL: redis://redis:6379/0
     depends_on:
       migrate:
         condition: service_completed_successfully
-      redis:
-        condition: service_healthy
 
   frontend:
     build:
@@ -253,6 +193,3 @@ services:
       - backend
     ports:
       - "3000:3000"
-
-volumes:
-  postgres_data:

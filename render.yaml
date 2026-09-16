@@ -1,50 +1,48 @@
-# Render Blueprint — provisions the ENTIRE deployment in one pass
-# ("New -> Blueprint" against this repo) instead of configuring nine services
-# by hand through the dashboard: the web services, the Celery worker layer,
-# and the databases.
+# Render Blueprint — provisions the web-facing half of the deployment in one
+# pass ("New -> Blueprint" against this repo): the Django backend, ai-service
+# and SearXNG as web services.
 #
-# Everything runs on Render, including the Celery workers — there's no
-# separate VM to provision elsewhere. Render has no free tier for background
-# workers (paid only, from $7/mo each); this blueprint keeps all five worker
-# processes separate (qualify-worker, research-worker, monitor-worker,
-# trends-worker, beat) rather than consolidating them onto fewer instances,
-# so every concurrency-isolation decision made in this codebase — the
-# qualify/research split, monitor's concurrency=4, trends' concurrency=1 —
-# stays exactly as built. Expect roughly $35-40/mo for the five workers on
-# Render's cheapest paid plan, on top of the (free-tier-eligible) web services
-# and databases below.
+# No databases are provisioned here. Postgres runs on Supabase and Redis runs
+# on Upstash, both external to Render — chosen specifically because Render's
+# own free Postgres expires 30 days after creation, and Render's own free Key
+# Value is capped at 25MB and wiped on every restart. Every POSTGRES_*/
+# REDIS_URL value below is `sync: false`: paste it in from your Supabase
+# project's connection info and Upstash's dashboard after the blueprint
+# deploys, never commit it here.
+#
+# The Celery worker layer (qualify-worker, research-worker, monitor-worker,
+# trends-worker, beat) is NOT here either — it runs on Railway, connecting
+# back to this same Supabase/Upstash pair. See README.md "Deploying" for why
+# (Render has no free tier at all for background workers; Railway's fits five
+# small always-on services) and the Railway-specific setup steps.
 #
 # `sync: false` on a secret means: set it in the Render dashboard after the
 # blueprint deploys, never commit it here.
-#
-# One real ordering wrinkle, not hidden: only `vantage-backend` runs
-# migrations on startup (RUN_MIGRATIONS=true, reusing backend/entrypoint.sh's
-# existing flag). The five workers below don't run migrations themselves, and
-# Render deploys blueprint services independently — there's no built-in
-# "wait for backend to finish migrating first" the way docker-compose's
-# `depends_on: condition: service_completed_successfully` gives locally. On a
-# brand-new deploy, a worker that starts before migrations finish will fail
-# its first few tasks; Render restarts crashed worker processes
-# automatically, so this self-heals once migrations complete, but it's worth
-# knowing about rather than being surprised by on the very first deploy.
 
 envVarGroups:
   - name: vantage-shared
     envVars:
       - key: DJANGO_SECRET_KEY
         sync: false
+      # Supabase connection info — from your project's Database settings page
+      # (use the pooler host/port, not the direct connection, the same way
+      # backend/.env does locally).
       - key: POSTGRES_DB
-        fromDatabase: { name: vantage-db, property: database }
+        sync: false
       - key: POSTGRES_USER
-        fromDatabase: { name: vantage-db, property: user }
+        sync: false
       - key: POSTGRES_PASSWORD
-        fromDatabase: { name: vantage-db, property: password }
+        sync: false
       - key: POSTGRES_HOST
-        fromDatabase: { name: vantage-db, property: host }
+        sync: false
       - key: POSTGRES_PORT
-        fromDatabase: { name: vantage-db, property: port }
+        sync: false
+      # Upstash's rediss:// connection string, from its dashboard. TLS is
+      # required — Celery won't start against it without CELERY_BROKER_USE_SSL,
+      # which backend/config/settings.py already sets automatically whenever
+      # REDIS_URL starts with rediss://.
       - key: REDIS_URL
-        fromService: { type: redis, name: vantage-redis, property: connectionString }
+        sync: false
       - key: AI_SERVICE_URL
         fromService: { type: web, name: vantage-ai-service, property: hostport }
       - key: AI_SERVICE_TIMEOUT_SECONDS
@@ -57,8 +55,8 @@ envVarGroups:
         value: "168"
       # Off by default even here, same reasoning as local dev: both make
       # outbound requests on a schedule, which should be a deliberate choice.
-      # Flip to "true" once the backend + all five workers are confirmed
-      # healthy on a first deploy.
+      # Flip to "true" once the Railway-hosted workers (see README) are
+      # confirmed healthy and actually connected to Supabase/Upstash.
       - key: MONITOR_ENABLED
         value: "false"
       - key: MONITOR_BASE_INTERVAL_HOURS
@@ -80,18 +78,7 @@ envVarGroups:
       - key: TREND_SCAN_SIGNAL_DEDUPE_DAYS
         value: "45"
 
-databases:
-  - name: vantage-db
-    plan: free
-    databaseName: vantage
-    user: vantage
-
 services:
-  - type: redis
-    name: vantage-redis
-    plan: free
-    ipAllowList: []  # Render-internal only — every consumer of this (backend + all five workers) is itself a Render service on the same private network.
-
   - type: web
     name: vantage-backend
     runtime: docker
@@ -104,78 +91,13 @@ services:
       - vantage-shared
     envVars:
       - key: RUN_MIGRATIONS
-        value: "true"  # The only service that migrates — see the ordering note above.
+        value: "true"  # The only service that migrates. The Railway-hosted workers don't — on a brand-new deploy, bring this service up first so the schema exists before they start querying it.
       - key: DJANGO_DEBUG
         value: "false"
       - key: DJANGO_ALLOWED_HOSTS
         sync: false  # vantage-backend.onrender.com, filled in after the first deploy assigns the domain.
       - key: CORS_ALLOWED_ORIGINS
         sync: false  # your Vercel domain.
-
-  - type: worker
-    name: vantage-qualify-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: celery -A config worker -l info -Q qualify,celery --concurrency=1
-    plan: starter
-    envVarGroups:
-      - vantage-shared
-    envVars:
-      - key: RUN_MIGRATIONS
-        value: "false"
-
-  - type: worker
-    name: vantage-research-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: celery -A config worker -l info -Q research --concurrency=1
-    plan: starter
-    envVarGroups:
-      - vantage-shared
-    envVars:
-      - key: RUN_MIGRATIONS
-        value: "false"
-
-  - type: worker
-    name: vantage-monitor-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: celery -A config worker -l info -Q monitor --concurrency=4
-    plan: starter
-    envVarGroups:
-      - vantage-shared
-    envVars:
-      - key: RUN_MIGRATIONS
-        value: "false"
-
-  - type: worker
-    name: vantage-trends-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: celery -A config worker -l info -Q trends --concurrency=1
-    plan: starter
-    envVarGroups:
-      - vantage-shared
-    envVars:
-      - key: RUN_MIGRATIONS
-        value: "false"
-
-  - type: worker
-    name: vantage-beat
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: celery -A config beat -l info
-    plan: starter
-    envVarGroups:
-      - vantage-shared
-    envVars:
-      - key: RUN_MIGRATIONS
-        value: "false"
 
   - type: web
     name: vantage-ai-service

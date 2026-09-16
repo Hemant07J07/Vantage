@@ -309,10 +309,14 @@ app public and silently disable auth.
 
 ## 7. Quick start
 
-**Prerequisites:** Docker + Docker Compose, and a free
-[Groq API key](https://console.groq.com) (no card required). That's the whole
-list — there's no local model to install or GPU to have, which is a real
-simplification from when this ran against Ollama.
+**Prerequisites:** Docker + Docker Compose; a free
+[Groq API key](https://console.groq.com) (no card required) — no local model
+to install or GPU to have, a real simplification from when this ran against
+Ollama; a free [Supabase](https://supabase.com) project for Postgres; and a
+free [Upstash](https://upstash.com) Redis database. Neither database runs
+locally — `docker-compose.yml` doesn't include a `postgres:` or `redis:`
+service, on purpose, so local dev and the deployed app share the same data
+rather than diverging.
 
 ```bash
 ./setup.sh                                  # creates .env files from the examples
@@ -366,43 +370,76 @@ unreachable rather than quietly counted as unchanged.
 
 ### Deploying
 
-`render.yaml` provisions the entire backend side of the deployment in one
-pass ("New → Blueprint" against this repo): the Django backend, ai-service
-and SearXNG as web services, a free Postgres and Key Value, and all five
-Celery processes (qualify-worker, research-worker, monitor-worker,
-trends-worker, beat) as separate background workers — kept separate rather
-than consolidated onto fewer instances, so the concurrency isolation this
-codebase relies on (the qualify/research split, monitor's concurrency=4,
-trends' concurrency=1) stays exactly as built. Render has no free tier for
-background workers, so budget roughly **$35-40/mo** for the five of them on
-Render's cheapest paid plan; the web services and databases stay free-tier
-eligible.
+Split across five platforms — each doing the one part it's actually good at:
 
-The frontend deploys to Vercel natively, no extra config beyond
-`BACKEND_INTERNAL_URL`/`NEXT_PUBLIC_WS_URL` pointed at the Render backend's
-public URL — `NEXT_PUBLIC_WS_URL` is baked into the client bundle at build
-time, so changing it later needs a redeploy, not just an env var edit.
+- **Supabase**: Postgres. Chosen over Render's own free Postgres specifically
+  because Render's expires 30 days after creation; Supabase's doesn't. Both
+  the Render-hosted backend and the Railway-hosted workers connect to this
+  same database over its pooler connection — one source of truth, not one
+  per platform.
+- **Upstash**: Redis — the Celery broker/result backend and the Channels
+  layer. Chosen over Render's free Key Value for the same reason: Render's is
+  capped at 25MB and wiped on every restart. Its `rediss://` connection
+  string needs no special handling in most of this codebase, but Celery is
+  the one exception — it won't start against a `rediss://` broker without
+  `ssl_cert_reqs` set explicitly (`CELERY_BROKER_USE_SSL`), which
+  `backend/config/settings.py` sets automatically whenever `REDIS_URL` starts
+  with `rediss://`. Not optional glue; without it every worker crashes on
+  boot with `E_REDIS_SSL_CERT_REQS_MISSING_INVALID`.
+- **Render** (`render.yaml`, "New → Blueprint" against this repo): the
+  Django backend, ai-service and SearXNG as web services — free-tier
+  eligible. No databases provisioned here; Postgres/Redis are the two above.
+- **Railway**: the five Celery processes (qualify-worker, research-worker,
+  monitor-worker, trends-worker, beat) — kept as five separate services
+  rather than consolidated onto fewer, so the concurrency isolation this
+  codebase relies on (the qualify/research split, monitor's concurrency=4,
+  trends' concurrency=1) stays exactly as built. Render has no free tier at
+  all for background workers, which is why they're not there; Railway's does
+  fit five small always-on services. Each is created manually in Railway's
+  dashboard (Docker deploy from `backend/Dockerfile`, one service per queue
+  command — see the `command:` lines in `docker-compose.yml`'s worker
+  services for the exact flags to use) with its variables set from
+  `railway.env.example`, which points them at the same Supabase/Upstash pair
+  the Render backend uses.
+- **Vercel**: the Next.js frontend, natively, no extra config beyond
+  `BACKEND_INTERNAL_URL`/`NEXT_PUBLIC_WS_URL` pointed at the Render backend's
+  public URL — `NEXT_PUBLIC_WS_URL` is baked into the client bundle at build
+  time, so changing it later needs a redeploy, not just an env var edit.
 
-One ordering wrinkle worth knowing before the first deploy: only the backend
-service runs migrations on startup. Render deploys blueprint services
-independently, with no equivalent to docker-compose's "wait for migrations to
-finish first" — a worker that starts before migrations complete will fail its
-first few tasks, then recover on its own once they do (Render restarts
-crashed worker processes automatically). Not a problem after the first
-deploy, just not instant on it.
+**Two things worth knowing about the Railway side, stated plainly:**
+
+- Railway's *ongoing* free plan is $1/month of credit — nowhere near enough
+  to run five always-on services continuously; what actually covers that is
+  the one-time $5 trial credit new accounts get, which will deplete over a
+  real but limited window under continuous usage-based billing. "Free" here
+  means "free for a while," not "free forever," unless usage is kept low or
+  a paid plan picks up where the trial leaves off.
+- Static outbound IPs are a **paid** Railway feature. On the free tier,
+  Railway's egress address isn't fixed, so there's no single IP to
+  allow-list on Supabase/Upstash the way one dedicated server's address
+  would give you — password and TLS are what's actually protecting those
+  connections, not network-level restriction. Worth knowing, not a secret
+  trapdoor — the same trade-off applies to plenty of managed PaaS-to-PaaS
+  setups, just not one to assume away.
+
+One ordering wrinkle worth knowing before the first deploy: only the Render
+backend service runs migrations on startup. The Railway workers don't, and
+the platforms deploy independently of each other — there's no equivalent to
+docker-compose's "wait for migrations to finish first." Bring the Render
+backend up first; a worker that starts querying before migrations complete
+will fail its first few tasks and then recover once they do (both platforms
+restart crashed worker processes automatically). Not a problem after the
+first deploy, just not instant on it.
 
 ---
 
 ## 8. Local dev without Docker (faster iteration)
 
 ```bash
-# Postgres + Redis still easiest via Docker:
-docker compose up postgres redis -d
-
 # Backend
 cd backend && python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # edit POSTGRES_HOST=localhost, REDIS_URL=redis://localhost:6379/0
+cp .env.example .env   # fill in the Supabase/Upstash values — see §7
 python manage.py migrate
 python manage.py seed_demo_data
 daphne -b 0.0.0.0 -p 8000 config.asgi:application
@@ -428,11 +465,13 @@ npm run dev
 Each item below was exercised against the running stack, not assumed.
 
 **Infrastructure**
-- `docker compose up --build` from clean brings all eleven services up. The
-  one-shot `migrate` service runs alone and exits 0; `backend` and every
-  Celery-based service wait on it. This fixed a real race where `backend` and
-  `celery-worker` — built from the same image — both ran `migrate` and
-  intermittently died with a duplicate-key error on `pg_type`.
+- `docker compose up --build` from clean brings all ten services up against
+  the real Supabase/Upstash pair configured in `backend/.env` — no local
+  `postgres:`/`redis:` service exists to fall back to. The one-shot `migrate`
+  service runs alone and exits 0; `backend` and every Celery-based service
+  wait on it. This fixed a real race where `backend` and `celery-worker` —
+  built from the same image — both ran `migrate` and intermittently died
+  with a duplicate-key error on `pg_type`.
 - `celery inspect active_queues` confirms `qualify-worker` consumes
   `qualify,celery` and `research-worker` consumes `research`, concurrency 1
   each. This is deliberate: an earlier run at `--concurrency=4` sent

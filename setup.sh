@@ -3,16 +3,6 @@
 # doesn't exist yet. Safe to re-run — never overwrites an existing .env.
 set -e
 
-# Root .env holds only the postgres service's own credentials, which docker
-# compose interpolates into docker-compose.yml. Keep POSTGRES_* here in sync
-# with backend/.env — that's what Django and the workers connect with.
-if [ ! -f ".env" ]; then
-  cp ".env.example" ".env"
-  echo "Created .env from .env.example"
-else
-  echo ".env already exists, leaving it alone"
-fi
-
 for dir in backend ai-service; do
   if [ ! -f "$dir/.env" ]; then
     cp "$dir/.env.example" "$dir/.env"
@@ -31,16 +21,24 @@ fi
 
 echo ""
 echo "Done. Next steps:"
-echo "  1. Make sure Ollama is running on your host:  ollama serve"
-echo "  2. Pull the model this project defaults to:   ollama pull qwen3:8b"
-echo "     (5.2GB. On a flaky connection wrap it in a retry loop — Ollama"
-echo "      resumes from partial blobs, so retrying costs nothing:"
-echo "        until ollama list | grep -q qwen3:8b; do ollama pull qwen3:8b; done )"
-echo "  3. docker compose up --build"
-echo "  4. In another terminal, once the stack is healthy:"
+echo "  1. Get a free Groq API key: https://console.groq.com (no card required)"
+echo "     Set GROQ_API_KEY in ai-service/.env."
+echo "  2. Get a free Supabase project: https://supabase.com — copy its Postgres"
+echo "     pooler connection info (Database settings) into backend/.env's"
+echo "     POSTGRES_* variables."
+echo "  3. Get a free Upstash Redis database: https://upstash.com — copy its"
+echo "     rediss:// connection string into backend/.env's REDIS_URL."
+echo "     (No local postgres/redis containers — docker-compose.yml doesn't"
+echo "      run either, on purpose, so local dev and the deployed app share"
+echo "      the same data.)"
+echo "  4. docker compose up --build"
+echo "  5. In another terminal, once the stack is healthy:"
 echo "        docker compose exec backend python manage.py seed_demo_data"
 echo "     Every lead is qualified by the real model, one at a time."
-echo "     Budget ~15 minutes; it prints per-lead progress."
-echo "  5. Open http://localhost:3000"
+echo "     Budget ~15 minutes; it prints per-lead progress. Skip this if"
+echo "     you'd rather keep your database empty — see SECURITY.md and the"
+echo "     README for the storage limits on Supabase/Upstash's free tiers."
+echo "  6. Open http://localhost:3000"
 echo "     The landing page is public — research a company without an account."
-echo "     Sign in with demo / vantage-demo for the dashboard at /dashboard."
+echo "     Sign in with demo / vantage-demo (if you seeded) or /register a"
+echo "     new account for the dashboard at /dashboard."

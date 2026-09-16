@@ -133,6 +133,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # --- Redis (shared by Celery broker/result backend + Channels layer) ------
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+_REDIS_IS_TLS = REDIS_URL.startswith("rediss://")
 
 CHANNEL_LAYERS = {
     "default": {
@@ -147,6 +148,19 @@ CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+
+# A `rediss://` URL (Upstash, or any TLS-only hosted Redis) isn't enough on its
+# own — unlike plain redis-py, Celery's Redis transport refuses to start
+# against one at all unless ssl_cert_reqs is set explicitly, raising
+# E_REDIS_SSL_CERT_REQS_MISSING_INVALID before a single task runs. CERT_NONE
+# because managed providers terminate TLS with certs Python's default trust
+# store often can't chase to a root; the connection is still encrypted, this
+# only skips validating the certificate chain.
+if _REDIS_IS_TLS:
+    import ssl
+
+    CELERY_BROKER_USE_SSL = {"ssl_cert_reqs": ssl.CERT_NONE}
+    CELERY_REDIS_BACKEND_USE_SSL = {"ssl_cert_reqs": ssl.CERT_NONE}
 # A research job is 4 sequential model calls, so the old 120s ceiling is far too
 # tight. The soft limit fires first and raises SoftTimeLimitExceeded, which the
 # tasks catch to mark the row failed with a real message; the hard limit is the

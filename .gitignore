@@ -10,6 +10,7 @@ venv/
 .env
 .env.local
 *.env.local
+railway.env
 !*.env.example
 
 # --- Django ------------------------------------------------------------
