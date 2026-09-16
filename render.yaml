@@ -33,7 +33,7 @@ services:
     dockerContext: ./backend
     dockerCommand: daphne -b 0.0.0.0 -p 8000 config.asgi:application
     plan: free
-    healthCheckPath: /api/
+    healthCheckPath: /health/
     envVars:
       - key: DJANGO_SECRET_KEY
         sync: false
