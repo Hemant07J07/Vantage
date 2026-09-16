@@ -10,6 +10,12 @@
 # project's connection info and Upstash's dashboard after the blueprint
 # deploys, never commit it here.
 #
+# No top-level `envVarGroups` — Render's Blueprint schema doesn't allow
+# `fromService` or `sync: false` entries inside one, only plain `value:`
+# pairs, so a shared group can't hold most of what these services actually
+# need. Only vantage-backend needs Supabase/Upstash anyway (ai-service needs
+# Groq/SearXNG instead), so each service just lists its own vars directly.
+#
 # The Celery worker layer (qualify-worker, research-worker, monitor-worker,
 # trends-worker, beat) is NOT here either — it runs on Railway, connecting
 # back to this same Supabase/Upstash pair. See README.md "Deploying" for why
@@ -19,8 +25,15 @@
 # `sync: false` on a secret means: set it in the Render dashboard after the
 # blueprint deploys, never commit it here.
 
-envVarGroups:
-  - name: vantage-shared
+services:
+  - type: web
+    name: vantage-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+    plan: free
+    healthCheckPath: /api/
     envVars:
       - key: DJANGO_SECRET_KEY
         sync: false
@@ -77,19 +90,6 @@ envVarGroups:
         value: "5"
       - key: TREND_SCAN_SIGNAL_DEDUPE_DAYS
         value: "45"
-
-services:
-  - type: web
-    name: vantage-backend
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: daphne -b 0.0.0.0 -p 8000 config.asgi:application
-    plan: free
-    healthCheckPath: /api/
-    envVarGroups:
-      - vantage-shared
-    envVars:
       - key: RUN_MIGRATIONS
         value: "true"  # The only service that migrates. The Railway-hosted workers don't — on a brand-new deploy, bring this service up first so the schema exists before they start querying it.
       - key: DJANGO_DEBUG
