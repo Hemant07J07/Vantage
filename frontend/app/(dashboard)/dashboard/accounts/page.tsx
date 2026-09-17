@@ -38,7 +38,7 @@ export default async function AccountsPage({
             body={
               search
                 ? `Nothing here mentions "${search}".`
-                : "Companies appear here when a lead arrives or you research one."
+                : "Companies you research appear here — try the search bar on the landing page or above."
             }
           />
         </Card>

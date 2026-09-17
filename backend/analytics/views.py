@@ -258,7 +258,11 @@ class SignalFeedView(APIView):
             limit = 20
 
         rows = (
-            Signal.objects.select_related("company")
+            # Scoped to companies this account has researched — Signal is a
+            # research artifact, not a shared log; two accounts researching
+            # different companies shouldn't see each other's feed.
+            Signal.objects.filter(company__user_links__user=request.user)
+            .select_related("company")
             .prefetch_related("sources")
             # Model Meta already orders by -detected_at, -observed_at; repeated
             # here so the contract survives a change to the model's default.
@@ -283,6 +287,21 @@ class SignalFeedView(APIView):
         return Response({"results": SignalFeedSerializer(selected, many=True).data})
 
 
+#: Activity types that are research artifacts, not lead-lifecycle events —
+#: these are what get scoped per user below. `Activity.company` is nullable
+#: (lead-lifecycle rows like CREATED are created without one — see
+#: leads/serializers.py), so splitting by type rather than "is company set"
+#: is what keeps that filter from silently swallowing rows that have no
+#: company to match against in the first place.
+_RESEARCH_ACTIVITY_TYPES = [
+    Activity.Type.RESEARCH_STARTED,
+    Activity.Type.RESEARCH_COMPLETED,
+    Activity.Type.RESEARCH_FAILED,
+    Activity.Type.SIGNAL_DETECTED,
+    Activity.Type.CHANGE_DETECTED,
+]
+
+
 class ActivityFeedView(APIView):
     """Unified recent activity across leads and companies."""
 
@@ -295,7 +314,15 @@ class ActivityFeedView(APIView):
             limit = 20
 
         rows = (
-            Activity.objects.select_related("lead", "company")
+            # Lead-lifecycle events (created, assigned, qualified...) stay a
+            # shared feed, same as the Leads page itself. Research events
+            # (a job finishing, a signal turning up) are scoped to companies
+            # this account has actually researched.
+            Activity.objects.filter(
+                Q(type__in=_RESEARCH_ACTIVITY_TYPES, company__user_links__user=request.user)
+                | ~Q(type__in=_RESEARCH_ACTIVITY_TYPES)
+            )
+            .select_related("lead", "company")
             .order_by("-created_at")[:limit]
         )
         return Response(
@@ -345,9 +372,13 @@ class InsightsView(APIView):
                 }
             )
 
+        # Scoped, unlike crossed/stalled above — this is about researched
+        # accounts specifically, which is now a per-account list, not a
+        # shared one.
         unresearched = (
             CompanyIntelligence.objects.filter(icp_fit_score__gte=70)
             .filter(company__leads__assignment__isnull=True)
+            .filter(company__user_links__user=request.user)
             .distinct()
             .count()
         )
@@ -374,8 +405,12 @@ class InsightsView(APIView):
                 }
             )
 
+        # Scoped too — jobs against companies not on this account's list
+        # aren't its accomplishments to report.
         researched = ResearchJob.objects.filter(
-            status=ResearchJob.Status.COMPLETE, created_at__gte=week_ago
+            status=ResearchJob.Status.COMPLETE,
+            created_at__gte=week_ago,
+            company__user_links__user=request.user,
         ).count()
         if researched:
             insights.append(

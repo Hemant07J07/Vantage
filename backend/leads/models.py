@@ -29,6 +29,31 @@ class Company(models.Model):
         return self.name
 
 
+class UserCompany(models.Model):
+    """
+    Which companies a user has researched — what makes a dashboard theirs.
+
+    Company/CompanyIntelligence stay one shared, cached row per domain
+    regardless of who researched it (so a second user researching a company
+    the first already looked up gets the fast, consistent, already-computed
+    result rather than paying for a duplicate research run). This is the
+    layer on top that makes each account's Accounts/Pipeline/Signal Feed
+    private: those views filter through this table rather than returning the
+    shared catalog wholesale, so a new signup starts with an empty dashboard
+    instead of seeing every other account's research.
+    """
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="companies")
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="user_links")
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "company"], name="uniq_user_company")]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} -> {self.company_id}"
+
+
 class Lead(models.Model):
     class Status(models.TextChoices):
         NEW = "new", "New"

@@ -15,7 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from leads.companies import normalize_domain, resolve_company
-from leads.models import Company
+from leads.models import Company, UserCompany
 
 from .models import CompanyIntelligence, ResearchClaim, ResearchJob, Signal
 from .serializers import (
@@ -73,6 +73,15 @@ class ResearchCreateView(APIView):
 
         domain = normalize_domain(raw_query)
 
+        # Companies stay one shared, cached row per domain regardless of who
+        # researched it — but signing in and searching one is what puts it on
+        # *your* dashboard. Every return path below researches or reuses the
+        # same shared result; this is what makes the difference between them
+        # private. Anonymous requests skip it entirely — nothing to link to.
+        def _link(company: Company) -> None:
+            if company and request.user.is_authenticated:
+                UserCompany.objects.get_or_create(user=request.user, company=company)
+
         # 1. Fresh research already on file? Hand it straight back.
         if domain:
             ttl = timedelta(hours=settings.RESEARCH_CACHE_TTL_HOURS)
@@ -87,6 +96,7 @@ class ResearchCreateView(APIView):
                     .prefetch_related(*_JOB_PREFETCH)
                     .get(id=fresh.latest_job_id)
                 )
+                _link(job.company)
                 data = ResearchJobSerializer(job).data
                 data["cached"] = True
                 return Response(data, status=status.HTTP_200_OK)
@@ -101,6 +111,7 @@ class ResearchCreateView(APIView):
                 .first()
             )
             if in_flight:
+                _link(in_flight.company)
                 data = ResearchJobSerializer(in_flight).data
                 data["cached"] = False
                 return Response(data, status=status.HTTP_202_ACCEPTED)
@@ -110,6 +121,7 @@ class ResearchCreateView(APIView):
             domain=domain,
             website=raw_query if domain else None,
         )
+        _link(company)
 
         job = ResearchJob.objects.create(
             company=company,
@@ -145,8 +157,13 @@ class CompanyViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CompanyListSerializer
 
     def get_queryset(self):
+        # Scoped to companies THIS account has researched — not the whole
+        # shared catalog. Two users researching the same company still share
+        # the underlying CompanyIntelligence (see ResearchCreateView._link);
+        # this is the join that makes each account's list its own.
         qs = (
-            Company.objects.select_related("intelligence", "watch_state")
+            Company.objects.filter(user_links__user=self.request.user)
+            .select_related("intelligence", "watch_state")
             .annotate(lead_count=Count("leads", distinct=True))
         )
         params = self.request.query_params
@@ -258,6 +275,10 @@ class CompanyViewSet(viewsets.ReadOnlyModelViewSet):
     def research(self, request, pk=None):
         """Force a fresh research run, bypassing the freshness cache."""
         company = self.get_object()
+        # Redundant in practice — get_object() already required this company
+        # to be on the caller's list via the scoped queryset above — but
+        # cheap and correct to state explicitly rather than rely on that.
+        UserCompany.objects.get_or_create(user=request.user, company=company)
         in_flight = ResearchJob.objects.filter(
             company=company,
             status__in=[ResearchJob.Status.QUEUED, ResearchJob.Status.RUNNING],
@@ -283,8 +304,12 @@ class ResearchJobListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        # Jobs for companies on this account's list — not just ones they
+        # personally triggered, so a scheduled monitor/trend-scan run against
+        # a company they've researched still shows up as their history.
         jobs = (
-            ResearchJob.objects.select_related("company")
+            ResearchJob.objects.filter(company__user_links__user=request.user)
+            .select_related("company")
             .prefetch_related(*_JOB_PREFETCH)[:50]
         )
         return Response({"results": ResearchJobSerializer(jobs, many=True).data})
@@ -300,7 +325,12 @@ class AIHealthView(APIView):
 
     def get(self, request):
         today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        requests_today = ResearchJob.objects.filter(created_at__gte=today).count()
+        # Scoped like everything else on the dashboard now — a global count
+        # here would disagree with the account's own Accounts/Pipeline/
+        # Research History sitting right next to it.
+        requests_today = ResearchJob.objects.filter(
+            company__user_links__user=request.user, created_at__gte=today
+        ).count()
 
         payload = {
             "service_reachable": False,
